@@ -3,7 +3,6 @@ use crate::util::fnv::Key;
 use std::{
     fmt::{Debug, Formatter, Result},
     hash::{Hash, Hasher},
-    ops::Deref,
 };
 
 #[derive(Clone, Eq, Default)]
@@ -55,14 +54,6 @@ impl Debug for Id {
         write!(f, "[hash: {:X}]", self.id)?;
 
         Ok(())
-    }
-}
-
-impl Deref for Id {
-    type Target = u64;
-
-    fn deref(&self) -> &Self::Target {
-        &self.id
     }
 }
 

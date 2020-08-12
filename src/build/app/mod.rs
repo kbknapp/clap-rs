@@ -1344,7 +1344,7 @@ impl<'help> App<'help> {
 
     /// Allows custom ordering of [``]s within the help message. Subcommands with a lower
     /// value will be displayed first in the help message. This is helpful when one would like to
-    /// emphasise frequently used subcommands, or prioritize those towards the top of the list.
+    /// emphasize frequently used subcommands, or prioritize those towards the top of the list.
     /// Duplicate values **are** allowed. Subcommands with duplicate display orders will be
     /// displayed in alphabetical order.
     ///
@@ -1927,10 +1927,10 @@ impl fmt::Display for Flag<'_, '_> {
 impl<'help> App<'help> {
     fn _do_parse(&mut self, it: &mut Input) -> ClapResult<ArgMatches> {
         debug!("App::_do_parse");
-        let mut matcher = ArgMatcher::default();
+        let mut matcher = ArgMatcher::new(&self);
 
-        // If there are global arguments, or settings we need to propgate them down to subcommands
-        // before parsing incase we run into a subcommand
+        // If there are global arguments, or settings we need to propagate them down to subcommands
+        // before parsing in case we run into a subcommand
         if !self.settings.is_set(AppSettings::Built) {
             self._build();
         }
@@ -2621,6 +2621,26 @@ impl<'help> App<'help> {
             self.get_subcommands()
                 .flat_map(|s| s.aliases.iter().map(|&(n, _)| n)),
         )
+    }
+
+    #[inline]
+    pub(crate) fn valid_ids_for_args(&self) -> Vec<Id> {
+        if cfg!(debug_assertions) {
+            let args = self.args.args.iter().map(|a| a.id.clone());
+            let groups = self.groups.iter().map(|g| g.id.clone());
+            args.chain(groups).collect()
+        } else {
+            vec![]
+        }
+    }
+
+    #[inline]
+    pub(crate) fn valid_ids_for_subcommands(&self) -> Vec<Id> {
+        if cfg!(debug_assertions) {
+            self.subcommands.iter().map(|sc| sc.id.clone()).collect()
+        } else {
+            vec![]
+        }
     }
 
     pub(crate) fn unroll_args_in_group(&self, group: &Id) -> Vec<Id> {

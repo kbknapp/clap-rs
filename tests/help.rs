@@ -35,7 +35,7 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-    -O, --Option <option3>           specific vals [possible values: fast, slow]
+    -O, --Option3 <option3>          specific vals [possible values: fast, slow]
         --long-option-2 <option2>    tests long options with exclusions
         --maxvals3 <maxvals>...      Tests 3 max vals
         --minvals2 <minvals>...      Tests 2 min vals

@@ -72,18 +72,56 @@ pub(crate) struct SubCommand {
 /// }
 /// ```
 /// [`App::get_matches`]: ./struct.App.html#method.get_matches
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ArgMatches {
+    #[cfg(debug_assertions)]
+    pub(crate) valid_args: Vec<Id>,
+    #[cfg(debug_assertions)]
+    pub(crate) valid_subcommands: Vec<Id>,
     pub(crate) args: IndexMap<Id, MatchedArg>,
     pub(crate) subcommand: Option<Box<SubCommand>>,
 }
 
-impl Default for ArgMatches {
-    fn default() -> Self {
-        ArgMatches {
-            args: IndexMap::new(),
-            subcommand: None,
+/// Private methods
+impl ArgMatches {
+    #[inline]
+    fn get_arg(&self, arg: &Id, _method: &str) -> Option<&MatchedArg> {
+        #[cfg(debug_assertions)]
+        {
+            if *arg != Id::empty_hash() && !self.valid_args.contains(arg) {
+                panic!(
+                    "`ArgMatches::{}(\"{:?}\")` is invalid invocation \
+                     - '{:?}' is not a name of an argument.\n\
+                     Make sure you're using the name of the argument itself \
+                     and not the name of short or long flags.",
+                    _method, arg, arg
+                );
+            }
         }
+
+        self.args.get(arg)
+    }
+
+    #[inline]
+    fn get_subcommand(&self, id: &Id, _method: &str) -> Option<&SubCommand> {
+        #[cfg(debug_assertions)]
+        {
+            if *id != Id::empty_hash() && !self.valid_subcommands.contains(id) {
+                panic!(
+                    "`ArgMatches::{}(\"{:?}\")` is invalid invocation \
+                      - '{:?}' is not a name of a subcommand.",
+                    _method, id, id
+                );
+            }
+        }
+
+        if let Some(ref sc) = self.subcommand {
+            if sc.id == *id {
+                return Some(sc);
+            }
+        }
+
+        None
     }
 }
 
@@ -116,7 +154,7 @@ impl ArgMatches {
     /// [`ArgMatches::values_of`]: ./struct.ArgMatches.html#method.values_of
     /// [`panic!`]: https://doc.rust-lang.org/std/macro.panic!.html
     pub fn value_of<T: Key>(&self, id: T) -> Option<&str> {
-        if let Some(arg) = self.args.get(&Id::from(id)) {
+        if let Some(arg) = self.get_arg(&Id::from(id), "value_of") {
             if let Some(v) = arg.vals.get(0) {
                 return Some(v.to_str().expect(INVALID_UTF8));
             }
@@ -148,7 +186,7 @@ impl ArgMatches {
     /// ```
     /// [`Arg::values_of_lossy`]: ./struct.ArgMatches.html#method.values_of_lossy
     pub fn value_of_lossy<T: Key>(&self, id: T) -> Option<Cow<'_, str>> {
-        if let Some(arg) = self.args.get(&Id::from(id)) {
+        if let Some(arg) = self.get_arg(&Id::from(id), "value_of_lossy") {
             if let Some(v) = arg.vals.get(0) {
                 return Some(v.to_string_lossy());
             }
@@ -184,8 +222,7 @@ impl ArgMatches {
     /// [`String`]: https://doc.rust-lang.org/std/string/struct.String.html
     /// [`ArgMatches::values_of_os`]: ./struct.ArgMatches.html#method.values_of_os
     pub fn value_of_os<T: Key>(&self, id: T) -> Option<&OsStr> {
-        self.args
-            .get(&Id::from(id))
+        self.get_arg(&Id::from(id), "value_of_os")
             .and_then(|arg| arg.vals.get(0).map(OsString::as_os_str))
     }
 
@@ -215,7 +252,7 @@ impl ArgMatches {
     /// [`Values`]: ./struct.Values.html
     /// [`Iterator`]: https://doc.rust-lang.org/std/iter/trait.Iterator.html
     pub fn values_of<T: Key>(&self, id: T) -> Option<Values<'_>> {
-        self.args.get(&Id::from(id)).map(|arg| {
+        self.get_arg(&Id::from(id), "values_of").map(|arg| {
             fn to_str_slice(o: &OsString) -> &str {
                 o.to_str().expect(INVALID_UTF8)
             }
@@ -252,7 +289,7 @@ impl ArgMatches {
     /// assert_eq!(itr.next(), None);
     /// ```
     pub fn values_of_lossy<T: Key>(&self, id: T) -> Option<Vec<String>> {
-        self.args.get(&Id::from(id)).map(|arg| {
+        self.get_arg(&Id::from(id), "values_of_lossy").map(|arg| {
             arg.vals
                 .iter()
                 .map(|v| v.to_string_lossy().into_owned())
@@ -297,9 +334,10 @@ impl ArgMatches {
         }
         let to_str_slice: fn(&'a OsString) -> &'a OsStr = to_str_slice; // coerce to fn pointer
 
-        self.args.get(&Id::from(id)).map(|arg| OsValues {
-            iter: arg.vals.iter().map(to_str_slice),
-        })
+        self.get_arg(&Id::from(id), "values_of_os")
+            .map(|arg| OsValues {
+                iter: arg.vals.iter().map(to_str_slice),
+            })
     }
 
     /// Gets the value of a specific argument (i.e. an argument that takes an additional
@@ -500,6 +538,22 @@ impl ArgMatches {
     pub fn is_present<T: Key>(&self, id: T) -> bool {
         let id = Id::from(id);
 
+        #[cfg(debug_assertions)]
+        {
+            if id != Id::empty_hash()
+                && !self.valid_args.contains(&id)
+                && !self.valid_subcommands.contains(&id)
+            {
+                panic!(
+                    "`ArgMatches::is_present(\"{:?}\")` is invalid invocation \
+                     - '{:?}' is neither argument nor subcommand.\n\
+                     Make sure you're using the name of the argument itself \
+                     and not the name of short or long flags.",
+                    id, id
+                );
+            }
+        }
+
         if let Some(ref sc) = self.subcommand {
             if sc.id == id {
                 return true;
@@ -548,7 +602,8 @@ impl ArgMatches {
     /// assert_eq!(m.occurrences_of("flag"), 1);
     /// ```
     pub fn occurrences_of<T: Key>(&self, id: T) -> u64 {
-        self.args.get(&Id::from(id)).map_or(0, |a| a.occurs)
+        self.get_arg(&Id::from(id), "occurrences_of")
+            .map_or(0, |a| a.occurs)
     }
 
     /// Gets the starting index of the argument in respect to all other arguments. Indices are
@@ -682,7 +737,7 @@ impl ArgMatches {
     /// [`ArgMatches`]: ./struct.ArgMatches.html
     /// [delimiter]: ./struct.Arg.html#method.value_delimiter
     pub fn index_of<T: Key>(&self, name: T) -> Option<usize> {
-        if let Some(arg) = self.args.get(&Id::from(name)) {
+        if let Some(arg) = self.get_arg(&Id::from(name), "index_of") {
             if let Some(i) = arg.indices.get(0) {
                 return Some(*i);
             }
@@ -764,9 +819,10 @@ impl ArgMatches {
     /// [`ArgMatches::index_of`]: ./struct.ArgMatches.html#method.index_of
     /// [delimiter]: ./struct.Arg.html#method.value_delimiter
     pub fn indices_of<T: Key>(&self, id: T) -> Option<Indices<'_>> {
-        self.args.get(&Id::from(id)).map(|arg| Indices {
-            iter: arg.indices.iter().cloned(),
-        })
+        self.get_arg(&Id::from(id), "indices_of")
+            .map(|arg| Indices {
+                iter: arg.indices.iter().cloned(),
+            })
     }
 
     /// Because [`Subcommand`]s are essentially "sub-[`App`]s" they have their own [`ArgMatches`]
@@ -801,12 +857,8 @@ impl ArgMatches {
     /// [`App`]: ./struct.App.html
     /// [`ArgMatches`]: ./struct.ArgMatches.html
     pub fn subcommand_matches<T: Key>(&self, id: T) -> Option<&ArgMatches> {
-        if let Some(ref s) = self.subcommand {
-            if s.id == id.into() {
-                return Some(&s.matches);
-            }
-        }
-        None
+        self.get_subcommand(&id.into(), "subcommand_matches")
+            .map(|sc| &sc.matches)
     }
 
     /// Because [`Subcommand`]s are essentially "sub-[`App`]s" they have their own [`ArgMatches`]

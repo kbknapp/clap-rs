@@ -281,6 +281,7 @@ fn group_acts_like_arg() {
     let m = App::new("prog")
         .arg(Arg::new("debug").long("debug").group("mode"))
         .arg(Arg::new("verbose").long("verbose").group("mode"))
+        .group(ArgGroup::new("mode"))
         .get_matches_from(vec!["prog", "--debug"]);
     assert!(m.is_present("mode"));
 }

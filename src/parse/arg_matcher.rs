@@ -3,19 +3,16 @@ use std::{collections::HashMap, ffi::OsString, mem, ops::Deref};
 
 // Internal
 use crate::{
-    build::{Arg, ArgSettings},
+    build::{App, Arg, ArgSettings},
     parse::{ArgMatches, MatchedArg, SubCommand, ValueType},
     util::Id,
 };
 
+// Third party
+use indexmap::IndexMap;
+
 #[derive(Debug)]
 pub(crate) struct ArgMatcher(pub(crate) ArgMatches);
-
-impl Default for ArgMatcher {
-    fn default() -> Self {
-        ArgMatcher(ArgMatches::default())
-    }
-}
 
 impl Deref for ArgMatcher {
     type Target = ArgMatches;
@@ -25,6 +22,17 @@ impl Deref for ArgMatcher {
 }
 
 impl ArgMatcher {
+    pub(crate) fn new(app: &App) -> Self {
+        ArgMatcher(ArgMatches {
+            #[cfg(debug_assertions)]
+            valid_args: app.valid_ids_for_args(),
+            #[cfg(debug_assertions)]
+            valid_subcommands: app.valid_ids_for_subcommands(),
+            args: IndexMap::new(),
+            subcommand: None,
+        })
+    }
+
     pub(crate) fn into_inner(self) -> ArgMatches {
         self.0
     }
