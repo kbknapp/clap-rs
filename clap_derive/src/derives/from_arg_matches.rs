@@ -11,14 +11,14 @@
 // This work was derived from Structopt (https://github.com/TeXitoi/structopt)
 // commit#ea76fa1b1b273e65e3b0b1046643715b49bec51f which is licensed under the
 // MIT/Apache 2.0 license.
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use proc_macro_error::abort;
 use quote::{quote, quote_spanned};
-use syn::{punctuated::Punctuated, spanned::Spanned, token::Comma, Field, Ident, Type};
+use syn::{punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, Field, Ident};
 
 use crate::{
     attrs::{Attrs, Kind, ParserKind},
-    utils::{sub_type, subty_if_name, Sp, Ty},
+    utils::{sub_type, Sp, Ty},
 };
 
 pub fn gen_for_struct(
@@ -43,12 +43,16 @@ pub fn gen_for_struct(
         )]
         #[deny(clippy::correctness)]
         impl clap::FromArgMatches for #struct_name {
-            fn from_arg_matches(arg_matches: &clap::ArgMatches) -> Self {
-                #struct_name #constructor
+            fn try_from_arg_matches(arg_matches: &clap::ArgMatches) -> clap::Result<Self> {
+                Ok(#struct_name #constructor)
             }
 
-            fn update_from_arg_matches(&mut self, arg_matches: &clap::ArgMatches) {
+            fn try_update_from_arg_matches(
+                &mut self,
+                arg_matches: &clap::ArgMatches
+            ) -> clap::Result<()> {
                 #updater
+                Ok(())
             }
         }
     }
@@ -69,27 +73,23 @@ pub fn gen_for_enum(name: &Ident) -> TokenStream {
         )]
         #[deny(clippy::correctness)]
         impl clap::FromArgMatches for #name {
-            fn from_arg_matches(arg_matches: &clap::ArgMatches) -> Self {
-                <#name as clap::Subcommand>::from_subcommand(arg_matches.subcommand()).unwrap()
+            fn try_from_arg_matches(arg_matches: &clap::ArgMatches) -> clap::Result<Self> {
+                <#name as clap::Subcommand>::from_subcommand(arg_matches.subcommand())
             }
-            fn update_from_arg_matches(&mut self, arg_matches: &clap::ArgMatches) {
-                <#name as clap::Subcommand>::update_from_subcommand(self, arg_matches.subcommand());
+            fn try_update_from_arg_matches(
+                &mut self,
+                arg_matches: &clap::ArgMatches
+            ) -> clap::Result<()> {
+                <#name as clap::Subcommand>::update_from_subcommand(self, arg_matches.subcommand())
             }
         }
-    }
-}
-
-fn gen_arg_enum_parse(ty: &Type, attrs: &Attrs) -> TokenStream {
-    let ci = attrs.case_insensitive();
-
-    quote_spanned! { ty.span()=>
-        |s| <#ty as clap::ArgEnum>::from_str(s, #ci).unwrap()
     }
 }
 
 fn gen_parsers(
     attrs: &Attrs,
     ty: &Sp<Ty>,
+    inner: &TokenStream,
     field_name: &Ident,
     field: &Field,
     update: Option<&TokenStream>,
@@ -97,35 +97,49 @@ fn gen_parsers(
     use self::ParserKind::*;
 
     let parser = attrs.parser();
-    let func = &parser.func;
+    let parse_func = &parser.parse_func;
     let span = parser.kind.span();
-    let (value_of, values_of, mut parse) = match *parser.kind {
-        FromStr => (
-            quote_spanned!(span=> value_of),
-            quote_spanned!(span=> values_of),
-            func.clone(),
-        ),
-        TryFromStr => (
-            quote_spanned!(span=> value_of),
-            quote_spanned!(span=> values_of),
-            quote_spanned!(func.span()=> |s| #func(s).unwrap()),
-        ),
-        FromOsStr => (
-            quote_spanned!(span=> value_of_os),
-            quote_spanned!(span=> values_of_os),
-            func.clone(),
-        ),
-        TryFromOsStr => (
-            quote_spanned!(span=> value_of_os),
-            quote_spanned!(span=> values_of_os),
-            quote_spanned!(func.span()=> |s| #func(s).unwrap()),
-        ),
-        FromOccurrences => (
-            quote_spanned!(span=> occurrences_of),
-            quote!(),
-            func.clone(),
-        ),
-        FromFlag => (quote!(), quote!(), func.clone()),
+
+    // The operand type of the `parse` function.
+    let parse_operand_type = match *parser.kind {
+        FromStr | TryFromStr => quote_spanned!(ty.span()=> &str),
+        Auto | FromOsStr | TryFromOsStr => quote_spanned!(ty.span()=> &::std::ffi::OsStr),
+        FromOccurrences => quote_spanned!(ty.span()=> u64),
+        FromFlag => quote_spanned!(ty.span()=> bool),
+    };
+
+    // Wrap `parse` in a closure so that we can give the operand a concrete type.
+    let parse = if let Auto = *parser.kind {
+        if parse_func.is_some() {
+            abort!(
+                parser.kind.span(),
+                "`auto` may not be used with a custom parsing function"
+            );
+        }
+        gen_auto_parser(&parse_operand_type, inner, attrs, span)
+    } else {
+        let func = match parse_func {
+            None => match *parser.kind {
+                Auto => panic!(), // Handled above.
+                FromStr | FromOsStr => {
+                    quote_spanned!(parser.kind.span()=> ::std::convert::From::from)
+                }
+                TryFromStr => quote_spanned!(parser.kind.span()=> ::std::str::FromStr::from_str),
+                TryFromOsStr => abort!(
+                    parser.kind.span(),
+                    "you must set parser for `try_from_os_str` explicitly"
+                ),
+                FromOccurrences => quote_spanned!(parser.kind.span()=> { |v| v as _ }),
+                FromFlag => quote_spanned!(parser.kind.span()=> ::std::convert::From::from),
+            },
+
+            Some(func) => match func {
+                Expr::Path(_) => quote!(#func),
+                _ => abort!(func, "`parse` argument must be a function path"),
+            },
+        };
+
+        quote_spanned!(span=> |s: #parse_operand_type| #func(s))
     };
 
     let flag = *attrs.parser().kind == ParserKind::FromFlag;
@@ -136,35 +150,53 @@ fn gen_parsers(
     // allows us to refer to `arg_matches` within a `quote_spanned` block
     let arg_matches = quote! { arg_matches };
 
+    let (value_of, values_of) = match *parser.kind {
+        Auto => (
+            quote_spanned!(span=> #arg_matches.parse_optional_t_auto(#name, #parse)?),
+            quote_spanned!(span=> #arg_matches.parse_optional_vec_t_auto(#name, #parse)?),
+        ),
+        FromStr => (
+            quote_spanned!(span=> #arg_matches.value_of(#name).map(#parse)),
+            quote_spanned!(span=>
+                #arg_matches.values_of(#name).map(|values| values.map(#parse)).collect()
+            ),
+        ),
+        TryFromStr => (
+            quote_spanned!(span=> #arg_matches.parse_optional_t(#name, #parse)?),
+            quote_spanned!(span=> #arg_matches.parse_optional_vec_t(#name, #parse)?),
+        ),
+        FromOsStr => (
+            quote_spanned!(span=> #arg_matches.value_of_os(#name).map(#parse)),
+            quote_spanned!(span=>
+                #arg_matches.values_of_os(#name).map(|values| values.map(#parse).collect())
+            ),
+        ),
+        TryFromOsStr => (
+            quote_spanned!(span=> #arg_matches.parse_optional_t_os(#name, #parse)?),
+            quote_spanned!(span=> #arg_matches.parse_optional_vec_t_os(#name, #parse)?),
+        ),
+        FromOccurrences => (
+            quote_spanned!(span=> (#parse)(#arg_matches.occurrences_of(#name))),
+            quote!(),
+        ),
+        FromFlag => (
+            quote_spanned!(span => (#parse)(#arg_matches.is_present(#name))),
+            quote!(),
+        ),
+    };
+
     let field_value = match **ty {
-        Ty::Bool => {
-            if update.is_some() {
-                quote_spanned! { ty.span()=>
-                    *#field_name || #arg_matches.is_present(#name)
-                }
-            } else {
-                quote_spanned! { ty.span()=>
-                    #arg_matches.is_present(#name)
-                }
-            }
-        }
+        Ty::Bool => quote_spanned! { ty.span()=>
+            #arg_matches.is_present(#name)
+        },
 
-        Ty::Option => {
-            if attrs.is_enum() {
-                if let Some(subty) = subty_if_name(&field.ty, "Option") {
-                    parse = gen_arg_enum_parse(subty, &attrs);
-                }
-            }
-
-            quote_spanned! { ty.span()=>
-                #arg_matches.#value_of(#name)
-                    .map(#parse)
-            }
-        }
+        Ty::Option => quote_spanned! { ty.span()=>
+            #value_of
+        },
 
         Ty::OptionOption => quote_spanned! { ty.span()=>
             if #arg_matches.is_present(#name) {
-                Some(#arg_matches.#value_of(#name).map(#parse))
+                Some(#value_of)
             } else {
                 None
             }
@@ -172,47 +204,27 @@ fn gen_parsers(
 
         Ty::OptionVec => quote_spanned! { ty.span()=>
             if #arg_matches.is_present(#name) {
-                Some(#arg_matches.#values_of(#name)
-                     .map(|v| v.map(#parse).collect())
-                     .unwrap_or_else(Vec::new))
+                Some(#values_of.unwrap_or_else(Vec::new))
             } else {
                 None
             }
         },
 
-        Ty::Vec => {
-            if attrs.is_enum() {
-                if let Some(subty) = subty_if_name(&field.ty, "Vec") {
-                    parse = gen_arg_enum_parse(subty, &attrs);
-                }
-            }
-
-            quote_spanned! { ty.span()=>
-                #arg_matches.#values_of(#name)
-                    .map(|v| v.map(#parse).collect())
-                    .unwrap_or_else(Vec::new)
-            }
-        }
+        Ty::Vec => quote_spanned! { ty.span()=>
+            #values_of.unwrap_or_else(Vec::new)
+        },
 
         Ty::Other if occurrences => quote_spanned! { ty.span()=>
-            #parse(#arg_matches.#value_of(#name))
+            #value_of
         },
 
         Ty::Other if flag => quote_spanned! { ty.span()=>
-            #parse(#arg_matches.is_present(#name))
+            #value_of
         },
 
-        Ty::Other => {
-            if attrs.is_enum() {
-                parse = gen_arg_enum_parse(&field.ty, &attrs);
-            }
-
-            quote_spanned! { ty.span()=>
-                #arg_matches.#value_of(#name)
-                    .map(#parse)
-                    .unwrap()
-            }
-        }
+        Ty::Other => quote_spanned! { ty.span()=>
+            #value_of.unwrap()
+        },
     };
 
     if let Some(access) = update {
@@ -225,6 +237,124 @@ fn gen_parsers(
     } else {
         quote_spanned!(field.span()=> #field_name: #field_value )
     }
+}
+
+/// Generate code to auto-detect which parsing trait a type supports and
+/// perform parsing using it.
+///
+/// Normally, doing this kind of thing would require specialization, which
+/// isn't available on stable Rust, however it turns out to be possible to
+/// do a limited form of specialization using autoref. This limited form
+/// only works in macro-like contexts, but that's what we're in here!
+///
+/// For more information on autoref specialization, see this blog post on
+/// [generalized autoref-based specialization].
+///
+/// [generalized autoref-based specialization]: http://lukaskalbertodt.github.io/2019/12/05/generalized-autoref-based-specialization.html
+fn gen_auto_parser(
+    operand_type: &TokenStream,
+    result_type: &TokenStream,
+    attrs: &Attrs,
+    span: Span,
+) -> TokenStream {
+    let ci = attrs.case_insensitive();
+
+    quote_spanned!(span=> |s: #operand_type| {
+        use std::convert::{Infallible, TryFrom};
+        use std::ffi::{OsStr, OsString};
+        use std::str::FromStr;
+        use std::marker::PhantomData;
+
+        struct Wrap<T>(T);
+        trait Specialize7 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<'a, T: clap::ArgEnum> Specialize7 for &&&&&&&Wrap<(&'a OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<String, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                match self.0.0.to_str() {
+                    None => Err(Err(self.0.0.to_os_string())),
+                    Some(s) => T::from_str(s, #ci).map_err(Ok),
+                }
+            }
+        }
+        trait Specialize6 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<'a, T: TryFrom<&'a OsStr>> Specialize6 for &&&&&&Wrap<(&'a OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<T::Error, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                T::try_from(self.0.0).map_err(Ok)
+            }
+        }
+        trait Specialize5 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<T: FromStr> Specialize5 for &&&&&Wrap<(&OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<T::Err, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                match self.0.0.to_str() {
+                    None => Err(Err(self.0.0.to_os_string())),
+                    Some(s) => T::from_str(s).map_err(Ok),
+                }
+            }
+        }
+        trait Specialize4 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<'a, T: TryFrom<&'a str>> Specialize4 for &&&&Wrap<(&'a OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<T::Error, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                match self.0.0.to_str() {
+                    None => Err(Err(self.0.0.to_os_string())),
+                    Some(s) => T::try_from(s).map_err(Ok),
+                }
+            }
+        }
+        trait Specialize3 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<'a, T: From<&'a OsStr>> Specialize3 for &&&Wrap<(&'a OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<Infallible, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                Ok(T::from(self.0.0))
+            }
+        }
+        trait Specialize2 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<'a, T: From<&'a str>> Specialize2 for &&Wrap<(&'a OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<Infallible, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                match self.0.0.to_str() {
+                    None => Err(Err(self.0.0.to_os_string())),
+                    Some(s) => Ok(T::from(s)),
+                }
+            }
+        }
+        trait Specialize1 {
+            type Return;
+            fn specialized(&self) -> Self::Return;
+        }
+        impl<'a, T> Specialize1 for &Wrap<(&'a OsStr, PhantomData<T>)> {
+            type Return = Result<T, Result<String, OsString>>;
+            fn specialized(&self) -> Self::Return {
+                Err(Ok(format!(
+                    "Type `{}` does not implement any of the parsing traits: \
+                    `clap::ArgEnum`, `TryFrom<&OsStr>`, `FromStr`, `TryFrom<&str>`, \
+                    `From<&OsStr>`, or `From<&str>`",
+                    stringify!(#result_type)
+                )))
+            }
+        }
+        (&&&&&&&Wrap((s, PhantomData::<#result_type>))).specialized()
+    })
 }
 
 pub fn gen_constructor(fields: &Punctuated<Field, Comma>, parent_attribute: &Attrs) -> TokenStream {
@@ -248,20 +378,25 @@ pub fn gen_constructor(fields: &Punctuated<Field, Comma>, parent_attribute: &Att
                     (Ty::Option, Some(sub_type)) => sub_type,
                     _ => &field.ty,
                 };
-                let unwrapper = match **ty {
-                    Ty::Option => quote!(),
-                    _ => quote_spanned!( ty.span()=> .unwrap() ),
+                let from_subcommand = quote_spanned! { kind.span() =>
+                    <#subcmd_type as clap::Subcommand>::from_subcommand(#arg_matches.subcommand())
                 };
-                quote_spanned! { kind.span()=>
-                    #field_name: {
-                        <#subcmd_type as clap::Subcommand>::from_subcommand(#arg_matches.subcommand())
-                        #unwrapper
-                    }
+                match **ty {
+                    Ty::Option => quote_spanned! { kind.span()=>
+                        #field_name: match #from_subcommand {
+                            Ok(cmd) => Some(cmd),
+                            Err(clap::Error { kind: clap::ErrorKind::UnrecognizedSubcommand, .. }) => None,
+                            Err(e) => return Err(e),
+                        }
+                    },
+                    _ => quote_spanned! { kind.span()=>
+                        #field_name: #from_subcommand?
+                    },
                 }
             }
 
             Kind::Flatten => quote_spanned! { kind.span()=>
-                #field_name: clap::FromArgMatches::from_arg_matches(#arg_matches)
+                #field_name: clap::FromArgMatches::try_from_arg_matches(#arg_matches)?
             },
 
             Kind::Skip(val) => match val {
@@ -269,7 +404,7 @@ pub fn gen_constructor(fields: &Punctuated<Field, Comma>, parent_attribute: &Att
                 Some(val) => quote_spanned!(kind.span()=> #field_name: (#val).into()),
             },
 
-            Kind::Arg(ty) => gen_parsers(&attrs, ty, field_name, field, None),
+            Kind::Arg(ty, inner) => gen_parsers(&attrs, ty, inner, field_name, field, None),
         }
     });
 
@@ -314,8 +449,8 @@ pub fn gen_updater(
                     _ => &field.ty,
                 };
 
-                let updater = quote_spanned! { ty.span()=>
-                    <#subcmd_type as clap::Subcommand>::update_from_subcommand(#field_name, subcmd);
+                let updater = quote_spanned!{ ty.span()=>
+                    <#subcmd_type as clap::Subcommand>::update_from_subcommand(#field_name, subcmd)?;
                 };
 
                 let updater = match **ty {
@@ -323,9 +458,9 @@ pub fn gen_updater(
                         if let Some(#field_name) = #field_name.as_mut() {
                             #updater
                         } else {
-                            *#field_name = <#subcmd_type as clap::Subcommand>::from_subcommand(
+                            *#field_name = Some(<#subcmd_type as clap::Subcommand>::from_subcommand(
                                 subcmd
-                            )
+                            )?)
                         }
                     },
                     _ => quote_spanned! { kind.span()=>
@@ -350,7 +485,7 @@ pub fn gen_updater(
 
             Kind::Skip(_) => quote!(),
 
-            Kind::Arg(ty) => gen_parsers(&attrs, ty, field_name, field, Some(&access)),
+            Kind::Arg(ty, inner) => gen_parsers(&attrs, ty, &inner, field_name, field, Some(&access)),
         }
     });
 
