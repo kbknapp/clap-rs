@@ -364,8 +364,8 @@ pub fn gen_app_augmentation(
     let app_methods = parent_attribute.top_level_methods();
     let version = parent_attribute.version();
     quote! {{
-        let #app_var = #app_var#app_methods;
         #( #args )*
+        let #app_var = #app_var#app_methods;
         #subcmd
         #app_var#version
     }}
