@@ -12,7 +12,9 @@
 // commit#ea76fa1b1b273e65e3b0b1046643715b49bec51f which is licensed under the
 // MIT/Apache 2.0 license.
 
-use clap::Clap;
+mod utils;
+
+use clap::{Clap, IntoApp};
 
 #[test]
 fn flatten() {
@@ -159,4 +161,77 @@ fn update_subcommands_with_flatten() {
     assert_eq!(Opt::parse_from(&["test", "command1", "42"]), opt);
     opt.update_from(&["test", "command2", "43"]);
     assert_eq!(Opt::parse_from(&["test", "command2", "43"]), opt);
+}
+
+#[test]
+fn docstrings_ordering_with_multiple_clap() {
+    /// this is the docstring for Flattened
+    #[derive(Clap)]
+    struct Flattened {
+        #[clap(long)]
+        foo: bool,
+    }
+
+    /// this is the docstring for Command
+    #[derive(Clap)]
+    struct Command {
+        #[clap(flatten)]
+        flattened: Flattened,
+    }
+
+    static ISSUE_2527: &str = "clap_derive 
+
+this is the docstring for Command
+
+USAGE:
+    command [FLAGS]
+
+FLAGS:
+        --foo        
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+";
+
+    assert!(utils::compare_output(
+        Command::into_app(),
+        "command --help",
+        ISSUE_2527,
+        false
+    ));
+}
+
+#[test]
+fn docstrings_ordering_with_multiple_clap_partial() {
+    /// this is the docstring for Flattened
+    #[derive(Clap)]
+    struct Flattened {
+        #[clap(long)]
+        foo: bool,
+    }
+
+    #[derive(Clap)]
+    struct Command {
+        #[clap(flatten)]
+        flattened: Flattened,
+    }
+
+    static ISSUE_2527: &str = "clap_derive 
+
+this is the docstring for Flattened
+
+USAGE:
+    command [FLAGS]
+
+FLAGS:
+        --foo        
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+";
+
+    assert!(utils::compare_output(
+        Command::into_app(),
+        "command --help",
+        ISSUE_2527,
+        false
+    ));
 }
